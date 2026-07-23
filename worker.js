@@ -19,7 +19,7 @@ export default {
     const keyboard = {
       inline_keyboard: [
         [
-          { text: " 下载地址 ", url: "https://github.com/wandan88/wangdan/releases/download/3.0.0/cf-3.0.0-setup.exe" }
+          { text: " 下载地址 ", url: "https://cfindex.omen66omen66.workers.dev" }
         ],
         [
           { text: "续费/售后/反馈", url: "https://t.me/chenze88888888" },
