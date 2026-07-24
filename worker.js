@@ -40,6 +40,12 @@ const WELCOME_TEXT =
 // 触发关键词列表 —— 后期想加关键词直接在这里追加
 const KEYWORDS = ["下载", "售后"];
 
+// 🚫 群管功能：违禁词配置（你可以自行增删）
+// 广告检测关键词（支持填链接特征或常见广告词）
+const AD_KEYWORDS = ["t.me/", "http://", "https://", "加微", "兼职", "代发", "博彩", "刷单"];
+// 色情信息检测关键词
+const PORN_KEYWORDS = ["裸聊", "看片", "赌场", "约炮", "迷药", "外围"];
+
 // ============================================================
 //  🚀  Cloudflare Worker 入口
 // ============================================================
@@ -71,18 +77,56 @@ export default {
 // ============================================================
 
 async function handleUpdate(update) {
+  // ── 处理入群验证的按钮点击 (Callback Query) ──────────────────────
+  if (update.callback_query) {
+    await handleCallbackQuery(update.callback_query);
+    return;
+  }
+
   const message = update.message;
   if (!message) return;
 
   const chatId   = message.chat.id;
   const chatType = message.chat.type; // "private" | "group" | "supergroup" | "channel"
-  const text     = (message.text || "").trim();
+  const text     = (message.text || message.caption || "").trim(); // 包含图文说明
+  const isPrivate = chatType === "private";
 
-  // ── 判断是否需要响应 ─────────────────────────────────────────
-  const isPrivate   = chatType === "private";
+  // ── 1. 处理新人入群 (入群验证) ─────────────────────────────────
+  if (message.new_chat_members) {
+    for (const member of message.new_chat_members) {
+      if (member.is_bot) continue; // 忽略机器人
+      
+      // 禁言该用户
+      await restrictChatMember(chatId, member.id, false);
+      
+      // 发送验证按钮 (使用 Markdown 格式让 @ 用户生效)
+      const mention = `[${member.first_name || '新成员'}](tg://user?id=${member.id})`;
+      const verifyText = `欢迎 ${mention} 加入！\n⚠️ 为了防止广告机器人，请点击下方按钮完成人机验证，否则将无法发言。`;
+      const keyboard = {
+        inline_keyboard: [[{ text: "🤖 我是人类，点击解除禁言", callback_data: `verify_${member.id}` }]]
+      };
+      await sendMessage(chatId, verifyText, keyboard, "Markdown");
+    }
+    return;
+  }
+
+  // ── 2. 广告与色情检测 (群聊中拦截) ──────────────────────────────
+  if (!isPrivate && text) {
+    const isAd = AD_KEYWORDS.some(kw => text.includes(kw));
+    const isPorn = PORN_KEYWORDS.some(kw => text.includes(kw));
+    
+    if (isAd || isPorn) {
+      // 发现违规内容，直接删除
+      await deleteMessage(chatId, message.message_id);
+      console.log(`已删除违规消息 (${isAd ? '广告' : '色情'})`);
+      return; // 拦截，不再往下走
+    }
+  }
+
+  // ── 3. 判断是否需要响应原本的推广功能 ─────────────────────────────
   const isMentioned = text.includes(BOT_USERNAME); // 群里艾特了机器人
 
-  // 私聊直接处理；群里只处理艾特了机器人的消息
+  // 推广和客服功能：私聊直接处理；群里只处理艾特了机器人的消息
   if (!isPrivate && !isMentioned) return;
 
   // ── /start：第一次建立连接时欢迎 ─────────────────────────────
@@ -96,6 +140,30 @@ async function handleUpdate(update) {
   if (hit) {
     await sendPromoPhoto(chatId);
     return;
+  }
+}
+
+// ── 入群验证按钮逻辑 ─────────────────────────────────────────────
+async function handleCallbackQuery(callbackQuery) {
+  const data = callbackQuery.data;
+  const fromId = callbackQuery.from.id;
+  const chatId = callbackQuery.message.chat.id;
+  const messageId = callbackQuery.message.message_id;
+
+  if (data.startsWith("verify_")) {
+    const targetUserId = parseInt(data.replace("verify_", ""));
+    
+    // 检查是不是被要求验证的本人点的
+    if (fromId === targetUserId) {
+      // 验证成功，解除禁言
+      await restrictChatMember(chatId, fromId, true);
+      await answerCallbackQuery(callbackQuery.id, "✅ 验证通过，您可以自由发言了！", true);
+      // 删除验证消息本身
+      await deleteMessage(chatId, messageId);
+    } else {
+      // 不是本人点，弹窗提示
+      await answerCallbackQuery(callbackQuery.id, "❌ 请让新进群的用户自己点击验证！", true);
+    }
   }
 }
 
@@ -124,18 +192,87 @@ async function sendPromoPhoto(chatId) {
   }
 }
 
-/** 发送纯文字消息 */
-async function sendMessage(chatId, text) {
+/** 发送纯文字消息 (支持附加键盘和格式) */
+async function sendMessage(chatId, text, reply_markup = null, parse_mode = null) {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
   try {
+    const body = { chat_id: chatId, text: text };
+    if (reply_markup) body.reply_markup = reply_markup;
+    if (parse_mode) body.parse_mode = parse_mode;
+
     const res = await fetch(url, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
+      body: JSON.stringify(body),
     });
     const result = await res.json();
     console.log(`sendMessage → ${chatId}:`, result.ok);
   } catch (e) {
     console.error(`sendMessage → ${chatId} 失败:`, e);
+  }
+}
+
+/** 禁言/解除禁言用户 */
+async function restrictChatMember(chatId, userId, canSpeak) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/restrictChatMember`;
+  try {
+    const permissions = canSpeak ? {
+      can_send_messages: true,
+      can_send_audios: true,
+      can_send_documents: true,
+      can_send_photos: true,
+      can_send_videos: true,
+      can_send_video_notes: true,
+      can_send_voice_notes: true,
+      can_send_polls: true,
+      can_send_other_messages: true,
+      can_add_web_page_previews: true
+    } : {
+      can_send_messages: false
+    };
+
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        user_id: userId,
+        permissions: permissions
+      })
+    });
+  } catch (e) {
+    console.error("restrictChatMember 失败:", e);
+  }
+}
+
+/** 删除消息 */
+async function deleteMessage(chatId, messageId) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId })
+    });
+  } catch (e) {
+    console.error("deleteMessage 失败:", e);
+  }
+}
+
+/** 响应 Callback Query (按钮点击弹窗) */
+async function answerCallbackQuery(callbackQueryId, text, showAlert = false) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        callback_query_id: callbackQueryId,
+        text: text,
+        show_alert: showAlert
+      })
+    });
+  } catch (e) {
+    console.error("answerCallbackQuery 失败:", e);
   }
 }
