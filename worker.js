@@ -91,8 +91,11 @@ async function handleUpdate(update) {
   const text     = (message.text || message.caption || "").trim(); // 包含图文说明
   const isPrivate = chatType === "private";
 
-  // ── 1. 处理新人入群 (入群验证) ─────────────────────────────────
+  // ── 1. 处理新人入群 (入群验证) & 删除进群系统提示 ──────────────
   if (message.new_chat_members) {
+    // 顺手删除 Telegram 官方的“XXX加入了群组”系统消息
+    await deleteMessage(chatId, message.message_id);
+
     for (const member of message.new_chat_members) {
       if (member.is_bot) continue; // 忽略机器人
       
@@ -107,6 +110,12 @@ async function handleUpdate(update) {
       };
       await sendMessage(chatId, verifyText, keyboard, "Markdown");
     }
+    return;
+  }
+
+  // ── 1.5 处理用户退群 (自动删除退群提示) ────────────────────────
+  if (message.left_chat_member) {
+    await deleteMessage(chatId, message.message_id);
     return;
   }
 
