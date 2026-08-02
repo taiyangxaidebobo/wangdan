@@ -12,7 +12,7 @@ const BROADCAST_CHAT_IDS = [
   "-1003518963517",
 ];
 
-// 👑 管理员 Telegram 用户数字 ID（填入后只有管理员可执行 /stats 和 /broadcast）
+// 👑 管理员 Telegram 用户数字 ID（填入后只有管理员可执行 /stats、/broadcast、/ban 等管理指令）
 const ADMIN_IDS = [
   "7567397654",
 ];
@@ -21,11 +21,11 @@ const ADMIN_IDS = [
 const PROMO_MESSAGES = [
   {
     photo:   "https://i.postimg.cc/fRzRTQY9/Gemini-G.png",
-    caption: "🔥 **代助手最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
+    caption: "🔥 **代副挂最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
     keyboard: {
       inline_keyboard: [
         [
-          { text: "官方下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
+          { text: "⬇️ 官方下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
         ],
         [
           { text: "续费/售后/反馈", url: "https://t.me/chenze88888888" },
@@ -54,6 +54,10 @@ const WELCOME_TEXT =
   `👋 你好，欢迎使用自动化助手！\n\n` +
   `💬 发送「下载」→ 获取最新下载地址\n` +
   `📞 发送「售后」→ 联系客服团队\n\n` +
+  `⚙️ 管理员指令：\n` +
+  `🚫 回复消息发送 /ban → 拉黑并踢出违规用户\n` +
+  `✅ 发送 /unban <ID> → 解除指定用户黑名单\n` +
+  `📋 发送 /banlist → 查看黑名单列表\n` +
   `📊 发送 /stats → 查看运行数据看板\n` +
   `📢 发送 /broadcast <内容> → 一键广播文本消息`;
 
@@ -95,6 +99,47 @@ const statsCache = {
 
 // 3. 防刷屏用户发言时间戳记录 (userId -> number[])
 const userMsgTimestamps = new Map();
+
+// 4. 全局黑名单缓存 (Set)
+const blacklistCache = new Set();
+
+/** 判断用户是否在黑名单中 */
+async function isBlacklisted(userId, env = null) {
+  const key = String(userId);
+  if (blacklistCache.has(key)) return true;
+  if (env && env.LAST_MSG_KV) {
+    try {
+      const val = await env.LAST_MSG_KV.get(`blacklist_${key}`);
+      if (val === "true") {
+        blacklistCache.add(key);
+        return true;
+      }
+    } catch (e) {}
+  }
+  return false;
+}
+
+/** 将用户加入黑名单 */
+async function addToBlacklist(userId, env = null) {
+  const key = String(userId);
+  blacklistCache.add(key);
+  if (env && env.LAST_MSG_KV) {
+    try {
+      await env.LAST_MSG_KV.put(`blacklist_${key}`, "true");
+    } catch (e) {}
+  }
+}
+
+/** 将用户移出黑名单 */
+async function removeFromBlacklist(userId, env = null) {
+  const key = String(userId);
+  blacklistCache.delete(key);
+  if (env && env.LAST_MSG_KV) {
+    try {
+      await env.LAST_MSG_KV.delete(`blacklist_${key}`);
+    } catch (e) {}
+  }
+}
 
 /** 获取指定群组/私聊上一次发送的消息 ID */
 async function getLastMsgId(chatId, env = null) {
@@ -182,6 +227,9 @@ async function setBotCommands() {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`;
   const commands = [
     { command: "start", description: "👋 启动机器人 / 查看功能说明" },
+    { command: "ban", description: "🚫 回复某条消息将其拉黑并踢出 (管理员)" },
+    { command: "unban", description: "✅ 解除指定用户的黑名单 (管理员)" },
+    { command: "banlist", description: "📋 查看当前黑名单列表 (管理员)" },
     { command: "stats", description: "📊 查看运行数据看板 (管理员)" },
     { command: "broadcast", description: "📢 一键广播消息 (管理员)" },
     { command: "myid", description: "🆔 查询我的 Telegram 数字 ID" },
@@ -244,6 +292,12 @@ export default {
 //  🤖  消息处理逻辑
 // ============================================================
 
+/** 检查用户是否拥有管理员权限 */
+function isAdminUser(userId) {
+  if (!ADMIN_IDS || ADMIN_IDS.length === 0) return true; // 若未指定管理员ID，默认均可使用
+  return ADMIN_IDS.map(String).includes(String(userId));
+}
+
 async function handleUpdate(update, env = null) {
   // ── 处理入群验证的按钮点击 (Callback Query) ──────────────────────
   if (update.callback_query) {
@@ -258,6 +312,19 @@ async function handleUpdate(update, env = null) {
   const chatType = message.chat.type; // "private" | "group" | "supergroup" | "channel"
   const text     = (message.text || message.caption || "").trim(); // 包含图文说明
   const isPrivate = chatType === "private";
+
+  // ── 0. 全局黑名单拦截检测 (黑名单账号直接删消息并踢出) ──────────────
+  if (message.from && !message.from.is_bot) {
+    const inBlacklist = await isBlacklisted(message.from.id, env);
+    if (inBlacklist) {
+      await deleteMessage(chatId, message.message_id);
+      if (!isPrivate) {
+        await banChatMember(chatId, message.from.id);
+      }
+      console.log(`[黑名单] 自动拦截并删除了黑名单用户 ${message.from.id} 的消息`);
+      return;
+    }
+  }
 
   // ── 1. 处理新人入群 (入群验证) & 删除进群系统提示 ──────────────
   if (message.new_chat_members) {
@@ -309,13 +376,7 @@ async function handleUpdate(update, env = null) {
     }
   }
 
-  /** 检查用户是否拥有管理员权限 */
-function isAdminUser(userId) {
-  if (!ADMIN_IDS || ADMIN_IDS.length === 0) return true; // 若未指定管理员ID，默认均可使用
-  return ADMIN_IDS.map(String).includes(String(userId));
-}
-
-// ── 4. 指令响应：/myid 查询、/setcommands 刷新快捷菜单、/stats & /broadcast ──
+  // ── 4. 指令响应：/myid 查询、/setcommands、/ban、/unban、/banlist、/stats & /broadcast ──
   if (text === "/myid" && message.from) {
     await sendMessage(chatId, `🆔 您的 Telegram 用户数字 ID 为: \`${message.from.id}\``, null, "Markdown", false, env);
     return;
@@ -332,6 +393,87 @@ function isAdminUser(userId) {
     } else {
       await sendMessage(chatId, `❌ 快捷指令菜单设置失败: ${JSON.stringify(res)}`, null, null, false, env);
     }
+    return;
+  }
+
+  // 🚫 回复消息拉黑并踢出用户：/ban
+  if (text.startsWith("/ban")) {
+    if (message.from && !isAdminUser(message.from.id)) {
+      await sendMessage(chatId, "⚠️ 抱歉，您没有权限使用 /ban 拉黑指令。", null, null, false, env);
+      return;
+    }
+
+    let targetUser = null;
+    if (message.reply_to_message && message.reply_to_message.from) {
+      targetUser = message.reply_to_message.from;
+    }
+
+    if (!targetUser) {
+      await sendMessage(chatId, "⚠️ 请通过【回复】要拉黑的用户消息，然后发送 `/ban` 指令！", null, "Markdown", false, env);
+      return;
+    }
+
+    if (isAdminUser(targetUser.id) || targetUser.is_bot) {
+      await sendMessage(chatId, "❌ 无法拉黑管理员或机器人账号。", null, null, false, env);
+      return;
+    }
+
+    await addToBlacklist(targetUser.id, env);
+    if (!isPrivate) {
+      await banChatMember(chatId, targetUser.id);
+      await deleteMessage(chatId, message.reply_to_message.message_id);
+    }
+    await deleteMessage(chatId, message.message_id);
+
+    const name = targetUser.first_name || "该用户";
+    const mention = `[${name}](tg://user?id=${targetUser.id})`;
+    await sendMessage(chatId, `🚫 已成功将 ${mention} (\`${targetUser.id}\`) 拉黑并踢出群组！`, null, "Markdown", false, env);
+    return;
+  }
+
+  // ✅ 解除黑名单与封禁：/unban <ID> 或回复消息发送 /unban
+  if (text.startsWith("/unban")) {
+    if (message.from && !isAdminUser(message.from.id)) {
+      await sendMessage(chatId, "⚠️ 抱歉，您没有权限使用 /unban 解封指令。", null, null, false, env);
+      return;
+    }
+
+    let targetUserId = null;
+    if (message.reply_to_message && message.reply_to_message.from) {
+      targetUserId = message.reply_to_message.from.id;
+    } else {
+      const parts = text.split(" ");
+      if (parts.length >= 2 && !isNaN(parts[1])) {
+        targetUserId = parseInt(parts[1], 10);
+      }
+    }
+
+    if (!targetUserId) {
+      await sendMessage(chatId, "⚠️ 请【回复】被封禁用户的消息发送 `/unban`，或直接发送 `/unban 用户数字ID`。", null, "Markdown", false, env);
+      return;
+    }
+
+    await removeFromBlacklist(targetUserId, env);
+    if (!isPrivate) {
+      await unbanChatMember(chatId, targetUserId);
+    }
+
+    await sendMessage(chatId, `✅ 已成功将用户 (\`${targetUserId}\`) 移出黑名单并解除封禁！`, null, "Markdown", false, env);
+    return;
+  }
+
+  // 📋 查看黑名单列表：/banlist
+  if (text === "/banlist") {
+    if (message.from && !isAdminUser(message.from.id)) {
+      await sendMessage(chatId, "⚠️ 抱歉，您没有权限查看黑名单。", null, null, false, env);
+      return;
+    }
+    const list = Array.from(blacklistCache);
+    const count = list.length;
+    const msg = `📋 **全局黑名单列表** (共 ${count} 人)\n` +
+      `────────────────────\n` +
+      (count > 0 ? list.map(id => `• \`${id}\``).join("\n") : "暂无黑名单记录");
+    await sendMessage(chatId, msg, null, "Markdown", false, env);
     return;
   }
 
@@ -517,6 +659,40 @@ async function restrictChatMember(chatId, userId, canSpeak) {
     });
   } catch (e) {
     console.error("restrictChatMember 失败:", e);
+  }
+}
+
+/** 封禁/踢出群成员 */
+async function banChatMember(chatId, userId) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/banChatMember`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, user_id: userId })
+    });
+    const result = await res.json();
+    return result.ok;
+  } catch (e) {
+    console.error("banChatMember 失败:", e);
+    return false;
+  }
+}
+
+/** 解除封禁群成员 */
+async function unbanChatMember(chatId, userId) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/unbanChatMember`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, user_id: userId, only_if_banned: true })
+    });
+    const result = await res.json();
+    return result.ok;
+  } catch (e) {
+    console.error("unbanChatMember 失败:", e);
+    return false;
   }
 }
 
