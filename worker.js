@@ -13,9 +13,8 @@ const BROADCAST_CHAT_IDS = [
 ];
 
 // 👑 管理员 Telegram 用户数字 ID（填入后只有管理员可执行 /stats 和 /broadcast）
-// 私聊机器人发送 /myid 即可快速获取你自己的 ID
 const ADMIN_IDS = [
-  // "123456789", // 替换为你的 Telegram 数字 ID
+  "7567397654",
 ];
 
 // ⭐ 核心推广消息配置 —— 支持多套文案/图片轮播展示
