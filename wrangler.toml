@@ -1,3 +1,9 @@
 name = "chengfeng"
 main = "worker.js"
 compatibility_date = "2026-07-17"
+
+# （可选）如需跨 Worker 重启/跨节点长久持久化保存上一条消息 ID，可在 Cloudflare 创建 KV 命名空间并取消下方注释：
+# [[kv_namespaces]]
+# binding = "LAST_MSG_KV"
+# id = "你的_KV_NAMESPACE_ID"
+

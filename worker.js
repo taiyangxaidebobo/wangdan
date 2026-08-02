@@ -46,15 +46,45 @@ const AD_KEYWORDS = ["t.me/", "http://", "https://", "加微", "兼职", "代发
 // 色情信息检测关键词
 const PORN_KEYWORDS = ["裸聊", "看片", "赌场", "约炮", "迷药", "外围"];
 
+// 📦 存储上一次发送的消息 ID（内存缓存，若绑定了 Cloudflare KV 则会自动持久化到 KV）
+const lastMessageIds = new Map();
+
+/** 获取指定群组/私聊上一次发送的消息 ID */
+async function getLastMsgId(chatId, env = null) {
+  const key = String(chatId);
+  if (env && env.LAST_MSG_KV) {
+    try {
+      const val = await env.LAST_MSG_KV.get(`last_msg_${key}`);
+      if (val) return parseInt(val, 10);
+    } catch (e) {
+      console.error(`[KV] 读取 chatId ${chatId} 失败:`, e);
+    }
+  }
+  return lastMessageIds.get(key) || null;
+}
+
+/** 记录指定群组/私聊最新发送的消息 ID */
+async function setLastMsgId(chatId, messageId, env = null) {
+  const key = String(chatId);
+  lastMessageIds.set(key, messageId);
+  if (env && env.LAST_MSG_KV) {
+    try {
+      await env.LAST_MSG_KV.put(`last_msg_${key}`, String(messageId));
+    } catch (e) {
+      console.error(`[KV] 写入 chatId ${chatId} 失败:`, e);
+    }
+  }
+}
+
 // ============================================================
 //  🚀  Cloudflare Worker 入口
 // ============================================================
 export default {
 
-  // ① 定时任务：按 Cron 自动向群组广播推广消息
+  // ① 定时任务：按 Cron 自动向群组广播推广消息（自动删上一条）
   async scheduled(event, env, ctx) {
     for (const chatId of BROADCAST_CHAT_IDS) {
-      await sendPromoPhoto(chatId);
+      await sendPromoPhoto(chatId, env);
     }
   },
 
@@ -63,7 +93,7 @@ export default {
     if (request.method === "POST") {
       try {
         const update = await request.json();
-        await handleUpdate(update);
+        await handleUpdate(update, env);
       } catch (e) {
         console.error("处理 Webhook 失败:", e);
       }
@@ -76,7 +106,7 @@ export default {
 //  🤖  消息处理逻辑
 // ============================================================
 
-async function handleUpdate(update) {
+async function handleUpdate(update, env = null) {
   // ── 处理入群验证的按钮点击 (Callback Query) ──────────────────────
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query);
@@ -108,7 +138,7 @@ async function handleUpdate(update) {
       const keyboard = {
         inline_keyboard: [[{ text: "🤖 我是人类，点击解除禁言", callback_data: `verify_${member.id}` }]]
       };
-      await sendMessage(chatId, verifyText, keyboard, "Markdown");
+      await sendMessage(chatId, verifyText, keyboard, "Markdown", false, env);
     }
     return;
   }
@@ -140,14 +170,14 @@ async function handleUpdate(update) {
 
   // ── /start：第一次建立连接时欢迎 ─────────────────────────────
   if (text === "/start" || text.startsWith("/start ")) {
-    await sendMessage(chatId, WELCOME_TEXT);
+    await sendMessage(chatId, WELCOME_TEXT, null, null, true, env);
     return;
   }
 
   // ── 关键词匹配：发送推广消息 ──────────────────────────────────
   const hit = KEYWORDS.some((kw) => text.includes(kw));
   if (hit) {
-    await sendPromoPhoto(chatId);
+    await sendPromoPhoto(chatId, env);
     return;
   }
 }
@@ -180,8 +210,16 @@ async function handleCallbackQuery(callbackQuery) {
 //  📤  Telegram API 封装
 // ============================================================
 
-/** 发送推广图片（含按钮） */
-async function sendPromoPhoto(chatId) {
+/** 发送推广图片（含按钮），并自动删除上一次发送的消息 */
+async function sendPromoPhoto(chatId, env = null) {
+  // 1. 删除该群/私聊上一次发送的消息
+  const oldMsgId = await getLastMsgId(chatId, env);
+  if (oldMsgId) {
+    console.log(`[删旧消息] 正在删除 chatId: ${chatId} 上一条消息 ID: ${oldMsgId}`);
+    await deleteMessage(chatId, oldMsgId);
+  }
+
+  // 2. 发送新的推广消息
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
   try {
     const res = await fetch(url, {
@@ -196,13 +234,25 @@ async function sendPromoPhoto(chatId) {
     });
     const result = await res.json();
     console.log(`sendPhoto → ${chatId}:`, result.ok);
+    if (result.ok && result.result?.message_id) {
+      // 3. 保存最新发送的消息 ID
+      await setLastMsgId(chatId, result.result.message_id, env);
+    }
   } catch (e) {
     console.error(`sendPhoto → ${chatId} 失败:`, e);
   }
 }
 
-/** 发送纯文字消息 (支持附加键盘和格式) */
-async function sendMessage(chatId, text, reply_markup = null, parse_mode = null) {
+/** 发送纯文字消息 (支持附加键盘、格式，以及选择性删除上一次发送的消息) */
+async function sendMessage(chatId, text, reply_markup = null, parse_mode = null, deletePrevious = false, env = null) {
+  if (deletePrevious) {
+    const oldMsgId = await getLastMsgId(chatId, env);
+    if (oldMsgId) {
+      console.log(`[删旧消息] 正在删除 chatId: ${chatId} 上一条消息 ID: ${oldMsgId}`);
+      await deleteMessage(chatId, oldMsgId);
+    }
+  }
+
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
   try {
     const body = { chat_id: chatId, text: text };
@@ -216,6 +266,9 @@ async function sendMessage(chatId, text, reply_markup = null, parse_mode = null)
     });
     const result = await res.json();
     console.log(`sendMessage → ${chatId}:`, result.ok);
+    if (result.ok && result.result?.message_id && deletePrevious) {
+      await setLastMsgId(chatId, result.result.message_id, env);
+    }
   } catch (e) {
     console.error(`sendMessage → ${chatId} 失败:`, e);
   }
@@ -258,13 +311,19 @@ async function restrictChatMember(chatId, userId, canSpeak) {
 async function deleteMessage(chatId, messageId) {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`;
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, message_id: messageId })
     });
+    const result = await res.json();
+    if (!result.ok) {
+      console.warn(`deleteMessage (${chatId}, ${messageId}) 结果:`, result.description);
+    }
+    return result.ok;
   } catch (e) {
     console.error("deleteMessage 失败:", e);
+    return false;
   }
 }
 
@@ -284,4 +343,4 @@ async function answerCallbackQuery(callbackQueryId, text, showAlert = false) {
   } catch (e) {
     console.error("answerCallbackQuery 失败:", e);
   }
-}
+}
