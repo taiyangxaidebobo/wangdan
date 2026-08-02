@@ -12,6 +12,12 @@ const BROADCAST_CHAT_IDS = [
   "-1003518963517",
 ];
 
+// 👑 管理员 Telegram 用户数字 ID（填入后只有管理员可执行 /stats 和 /broadcast）
+// 私聊机器人发送 /myid 即可快速获取你自己的 ID
+const ADMIN_IDS = [
+  // "123456789", // 替换为你的 Telegram 数字 ID
+];
+
 // ⭐ 核心推广消息配置 —— 支持多套文案/图片轮播展示
 const PROMO_MESSAGES = [
   {
@@ -272,8 +278,23 @@ async function handleUpdate(update, env = null) {
     }
   }
 
-  // ── 4. 指令响应：数据看板 /stats & 一键广播 /broadcast ───────────
+  /** 检查用户是否拥有管理员权限 */
+function isAdminUser(userId) {
+  if (!ADMIN_IDS || ADMIN_IDS.length === 0) return true; // 若未指定管理员ID，默认均可使用
+  return ADMIN_IDS.map(String).includes(String(userId));
+}
+
+// ── 4. 指令响应：/myid 查询、数据看板 /stats & 一键广播 /broadcast ──
+  if (text === "/myid" && message.from) {
+    await sendMessage(chatId, `🆔 您的 Telegram 用户数字 ID 为: \`${message.from.id}\``, null, "Markdown", false, env);
+    return;
+  }
+
   if (text === "/stats") {
+    if (message.from && !isAdminUser(message.from.id)) {
+      await sendMessage(chatId, "⚠️ 抱歉，您没有权限使用 /stats 统计指令。", null, null, false, env);
+      return;
+    }
     const s = await getStats(env);
     const bjTime = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
     const statsMsg = 
@@ -291,6 +312,10 @@ async function handleUpdate(update, env = null) {
   }
 
   if (text.startsWith("/broadcast ")) {
+    if (message.from && !isAdminUser(message.from.id)) {
+      await sendMessage(chatId, "⚠️ 抱歉，您没有权限使用 /broadcast 一键广播指令。", null, null, false, env);
+      return;
+    }
     const broadcastText = text.replace("/broadcast ", "").trim();
     if (!broadcastText) return;
 
