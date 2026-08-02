@@ -21,11 +21,11 @@ const ADMIN_IDS = [
 const PROMO_MESSAGES = [
   {
     photo:   "https://i.postimg.cc/fRzRTQY9/Gemini-G.png",
-    caption: "🔥 **代副挂最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
+    caption: "🔥 **代助手最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
     keyboard: {
       inline_keyboard: [
         [
-          { text: "⬇️ 官方下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
+          { text: "官方下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
         ],
         [
           { text: "续费/售后/反馈", url: "https://t.me/chenze88888888" },
@@ -177,6 +177,28 @@ function isNightTime() {
   }
 }
 
+/** 注册并更新 Telegram 聊天框输入 / 自动弹出的快捷指令菜单 */
+async function setBotCommands() {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`;
+  const commands = [
+    { command: "start", description: "👋 启动机器人 / 查看功能说明" },
+    { command: "stats", description: "📊 查看运行数据看板 (管理员)" },
+    { command: "broadcast", description: "📢 一键广播消息 (管理员)" },
+    { command: "myid", description: "🆔 查询我的 Telegram 数字 ID" },
+  ];
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+    return await res.json();
+  } catch (e) {
+    console.error("setMyCommands 失败:", e);
+    return { ok: false, error: String(e) };
+  }
+}
+
 // ============================================================
 //  🚀  Cloudflare Worker 入口
 // ============================================================
@@ -196,6 +218,16 @@ export default {
 
   // ② Webhook：接收 Telegram 推送的用户消息并自动回复
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // GET /set-commands 访问此 URL 可随时手动刷新 Telegram 快捷指令菜单
+    if (request.method === "GET" && url.pathname === "/set-commands") {
+      const res = await setBotCommands();
+      return new Response(JSON.stringify(res, null, 2), {
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+
     if (request.method === "POST") {
       try {
         const update = await request.json();
@@ -283,9 +315,23 @@ function isAdminUser(userId) {
   return ADMIN_IDS.map(String).includes(String(userId));
 }
 
-// ── 4. 指令响应：/myid 查询、数据看板 /stats & 一键广播 /broadcast ──
+// ── 4. 指令响应：/myid 查询、/setcommands 刷新快捷菜单、/stats & /broadcast ──
   if (text === "/myid" && message.from) {
     await sendMessage(chatId, `🆔 您的 Telegram 用户数字 ID 为: \`${message.from.id}\``, null, "Markdown", false, env);
+    return;
+  }
+
+  if (text === "/setcommands") {
+    if (message.from && !isAdminUser(message.from.id)) {
+      await sendMessage(chatId, "⚠️ 抱歉，您没有权限刷新指令菜单。", null, null, false, env);
+      return;
+    }
+    const res = await setBotCommands();
+    if (res.ok) {
+      await sendMessage(chatId, "✅ 快捷指令菜单设置成功！现在在聊天框输入 / 即可弹出快捷菜单。", null, null, false, env);
+    } else {
+      await sendMessage(chatId, `❌ 快捷指令菜单设置失败: ${JSON.stringify(res)}`, null, null, false, env);
+    }
     return;
   }
 
