@@ -21,11 +21,11 @@ const ADMIN_IDS = [
 const PROMO_MESSAGES = [
   {
     photo:   "https://i.postimg.cc/9FyZnPtk/xunjie-final-poster-1785696923575.jpg",
-    caption: "🔥 **代副挂最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
+    caption: "🔥 **代付助手最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
     keyboard: {
       inline_keyboard: [
         [
-          { text: "⬇️ 官方下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
+          { text: "官方下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
         ],
         [
           { text: "续费/售后/反馈", url: "https://t.me/chenze88888888" },
@@ -39,10 +39,10 @@ const PROMO_MESSAGES = [
     keyboard: {
       inline_keyboard: [
         [
-          { text: "⬇️ 点击获取最新包", url: "https://cfindex.omen66omen66.workers.dev" },
+          { text: "点击获取最新包", url: "https://cfindex.omen66omen66.workers.dev" },
         ],
         [
-          { text: "💬 联系售后客服", url: "https://t.me/chenze88888888" },
+          { text: "联系售后客服", url: "https://t.me/chenze88888888" },
         ],
       ],
     },
