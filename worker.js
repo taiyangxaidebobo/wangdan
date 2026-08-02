@@ -10,44 +10,86 @@ const BOT_USERNAME = "@chengfeng_daifugua_bot";
 // 定时广播的目标群组
 const BROADCAST_CHAT_IDS = [
   "-1003518963517",
-  "-1003737910913",
 ];
 
-// ⭐ 核心推广消息配置 —— 关键词触发 & 定时任务 都发这条消息
-//    后期想改消息，只改这里就行！
-const PROMO_MESSAGE = {
-  photo:   "https://i.postimg.cc/fRzRTQY9/Gemini-G.png",
-  caption: "",  // 图片说明文字，留空则不显示
-  keyboard: {
-    inline_keyboard: [
-      [
-        { text: "⬇️ 下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
+// ⭐ 核心推广消息配置 —— 支持多套文案/图片轮播展示
+const PROMO_MESSAGES = [
+  {
+    photo:   "https://i.postimg.cc/fRzRTQY9/Gemini-G.png",
+    caption: "🔥 **代副挂最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
+    keyboard: {
+      inline_keyboard: [
+        [
+          { text: "⬇️ 官方下载地址", url: "https://cfindex.omen66omen66.workers.dev" },
+        ],
+        [
+          { text: "续费/售后/反馈", url: "https://t.me/chenze88888888" },
+        ],
       ],
-      [
-        { text: "续费/售后/反馈", url: "https://t.me/chenze88888888" },
-        { text: "续费/售后",      url: "https://t.me/x_xxx88"         },
-      ],
-    ],
+    },
   },
-};
+  {
+    photo:   "https://i.postimg.cc/fRzRTQY9/Gemini-G.png",
+    caption: "⚡ **全自动稳定运行 · 助您流量暴涨！**\n售后请认准官方客服，防伪防诈骗。",
+    keyboard: {
+      inline_keyboard: [
+        [
+          { text: "⬇️ 点击获取最新包", url: "https://cfindex.omen66omen66.workers.dev" },
+        ],
+        [
+          { text: "💬 联系售后客服", url: "https://t.me/chenze88888888" },
+        ],
+      ],
+    },
+  },
+];
 
-// /start 欢迎消息（第一次建立连接时回复）
+// /start 欢迎消息（第一次建立连接或私聊时回复）
 const WELCOME_TEXT =
-  `👋 你好，欢迎使用！\n\n` +
-  `💬 发送「下载」→ 获取下载地址\n` +
-  `📞 发送「售后」→ 联系售后客服`;
+  `👋 你好，欢迎使用自动化助手！\n\n` +
+  `💬 发送「下载」→ 获取最新下载地址\n` +
+  `📞 发送「售后」→ 联系客服团队\n\n` +
+  `📊 发送 /stats → 查看运行数据看板\n` +
+  `📢 发送 /broadcast <内容> → 一键广播文本消息`;
 
-// 触发关键词列表 —— 后期想加关键词直接在这里追加
+// 触发关键词列表
 const KEYWORDS = ["下载", "售后"];
 
-// 🚫 群管功能：违禁词配置（你可以自行增删）
-// 广告检测关键词（支持填链接特征或常见广告词）
+// 🚫 群管功能：违禁词配置
 const AD_KEYWORDS = ["t.me/", "http://", "https://", "加微", "兼职", "代发", "博彩", "刷单"];
-// 色情信息检测关键词
 const PORN_KEYWORDS = ["裸聊", "看片", "赌场", "约炮", "迷药", "外围"];
 
-// 📦 存储上一次发送的消息 ID（内存缓存，若绑定了 Cloudflare KV 则会自动持久化到 KV）
+// ⚡ 防刷屏 / 限速配置
+const RATE_LIMIT = {
+  maxMessages: 3,       // 允许的最大消息数
+  windowSeconds: 5,     // 时间窗口（秒）：5秒内发超过3条将被认定为刷屏
+};
+
+// 🌙 定时广播夜间避打扰设置（北京时间 UTC+8）
+const NIGHT_QUIET_HOURS = {
+  enabled: true,        // 是否开启夜间避打扰
+  startHour: 23,        // 晚上 23:00 开始避打扰
+  endHour: 8,           // 早上 08:00 恢复广播
+};
+
+// ============================================================
+//  📦  缓存与持久化 (Memory Map + Cloudflare KV 降级)
+// ============================================================
+
+// 1. 存储上一次发送的消息 ID
 const lastMessageIds = new Map();
+
+// 2. 统计看板缓存
+const statsCache = {
+  adsIntercepted: 0,
+  pornIntercepted: 0,
+  rateLimitTriggers: 0,
+  verifiedMembers: 0,
+  totalBroadcasts: 0,
+};
+
+// 3. 防刷屏用户发言时间戳记录 (userId -> number[])
+const userMsgTimestamps = new Map();
 
 /** 获取指定群组/私聊上一次发送的消息 ID */
 async function getLastMsgId(chatId, env = null) {
@@ -76,15 +118,74 @@ async function setLastMsgId(chatId, messageId, env = null) {
   }
 }
 
+/** 累加统计计数 */
+async function incrementStat(key, env = null) {
+  statsCache[key] = (statsCache[key] || 0) + 1;
+  if (env && env.LAST_MSG_KV) {
+    try {
+      const current = await env.LAST_MSG_KV.get(`stat_${key}`);
+      const val = (parseInt(current, 10) || 0) + 1;
+      await env.LAST_MSG_KV.put(`stat_${key}`, String(val));
+    } catch (e) {}
+  }
+}
+
+/** 获取最新统计看板数据 */
+async function getStats(env = null) {
+  const keys = ['adsIntercepted', 'pornIntercepted', 'rateLimitTriggers', 'verifiedMembers', 'totalBroadcasts'];
+  const res = { ...statsCache };
+  if (env && env.LAST_MSG_KV) {
+    try {
+      for (const k of keys) {
+        const val = await env.LAST_MSG_KV.get(`stat_${k}`);
+        if (val !== null) res[k] = parseInt(val, 10) || 0;
+      }
+    } catch (e) {}
+  }
+  return res;
+}
+
+/** 检查用户发言是否触发防刷屏/限速 */
+function checkRateLimit(userId) {
+  const now = Date.now();
+  const windowMs = RATE_LIMIT.windowSeconds * 1000;
+  let timestamps = userMsgTimestamps.get(userId) || [];
+  
+  timestamps = timestamps.filter(t => now - t < windowMs);
+  timestamps.push(now);
+  userMsgTimestamps.set(userId, timestamps);
+
+  return timestamps.length > RATE_LIMIT.maxMessages;
+}
+
+/** 判断当前时间是否属于夜间免打扰时段（北京时间 UTC+8） */
+function isNightTime() {
+  if (!NIGHT_QUIET_HOURS.enabled) return false;
+  const now = new Date();
+  const utcHours = now.getUTCHours();
+  const bjHours = (utcHours + 8) % 24;
+  
+  if (NIGHT_QUIET_HOURS.startHour > NIGHT_QUIET_HOURS.endHour) {
+    return bjHours >= NIGHT_QUIET_HOURS.startHour || bjHours < NIGHT_QUIET_HOURS.endHour;
+  } else {
+    return bjHours >= NIGHT_QUIET_HOURS.startHour && bjHours < NIGHT_QUIET_HOURS.endHour;
+  }
+}
+
 // ============================================================
 //  🚀  Cloudflare Worker 入口
 // ============================================================
 export default {
 
-  // ① 定时任务：按 Cron 自动向群组广播推广消息（自动删上一条）
+  // ① 定时任务：按 Cron 自动向群组广播推广消息（夜间免打扰 + 自动删上一条）
   async scheduled(event, env, ctx) {
+    if (isNightTime()) {
+      console.log("[定时任务] 当前处于北京时间夜间免打扰时段，跳过广播");
+      return;
+    }
     for (const chatId of BROADCAST_CHAT_IDS) {
       await sendPromoPhoto(chatId, env);
+      await incrementStat("totalBroadcasts", env);
     }
   },
 
@@ -109,7 +210,7 @@ export default {
 async function handleUpdate(update, env = null) {
   // ── 处理入群验证的按钮点击 (Callback Query) ──────────────────────
   if (update.callback_query) {
-    await handleCallbackQuery(update.callback_query);
+    await handleCallbackQuery(update.callback_query, env);
     return;
   }
 
@@ -123,16 +224,13 @@ async function handleUpdate(update, env = null) {
 
   // ── 1. 处理新人入群 (入群验证) & 删除进群系统提示 ──────────────
   if (message.new_chat_members) {
-    // 顺手删除 Telegram 官方的“XXX加入了群组”系统消息
     await deleteMessage(chatId, message.message_id);
 
     for (const member of message.new_chat_members) {
-      if (member.is_bot) continue; // 忽略机器人
+      if (member.is_bot) continue;
       
-      // 禁言该用户
       await restrictChatMember(chatId, member.id, false);
       
-      // 发送验证按钮 (使用 Markdown 格式让 @ 用户生效)
       const mention = `[${member.first_name || '新成员'}](tg://user?id=${member.id})`;
       const verifyText = `欢迎 ${mention} 加入！\n⚠️ 为了防止广告机器人，请点击下方按钮完成人机验证，否则将无法发言。`;
       const keyboard = {
@@ -149,32 +247,73 @@ async function handleUpdate(update, env = null) {
     return;
   }
 
-  // ── 2. 广告与色情检测 (群聊中拦截) ──────────────────────────────
+  // ── 2. 防刷屏 / 限速检测 (仅群聊非机器人生效) ───────────────────
+  if (!isPrivate && message.from && !message.from.is_bot) {
+    const isRateLimited = checkRateLimit(message.from.id);
+    if (isRateLimited) {
+      await deleteMessage(chatId, message.message_id);
+      await incrementStat("rateLimitTriggers", env);
+      console.log(`[防刷屏] 用户 ${message.from.id} 发言频繁 (${RATE_LIMIT.windowSeconds}s内超过${RATE_LIMIT.maxMessages}条)，已自动拦截删除`);
+      return;
+    }
+  }
+
+  // ── 3. 广告与色情检测 (群聊拦截) ─────────────────────────────
   if (!isPrivate && text) {
     const isAd = AD_KEYWORDS.some(kw => text.includes(kw));
     const isPorn = PORN_KEYWORDS.some(kw => text.includes(kw));
     
     if (isAd || isPorn) {
-      // 发现违规内容，直接删除
       await deleteMessage(chatId, message.message_id);
+      if (isAd) await incrementStat("adsIntercepted", env);
+      if (isPorn) await incrementStat("pornIntercepted", env);
       console.log(`已删除违规消息 (${isAd ? '广告' : '色情'})`);
-      return; // 拦截，不再往下走
+      return;
     }
   }
 
-  // ── 3. 判断是否需要响应原本的推广功能 ─────────────────────────────
-  const isMentioned = text.includes(BOT_USERNAME); // 群里艾特了机器人
+  // ── 4. 指令响应：数据看板 /stats & 一键广播 /broadcast ───────────
+  if (text === "/stats") {
+    const s = await getStats(env);
+    const bjTime = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+    const statsMsg = 
+      `📊 **机器人运行统计看板**\n` +
+      `────────────────────\n` +
+      `🚫 **广告拦截**: ${s.adsIntercepted} 次\n` +
+      `🔞 **色情拦截**: ${s.pornIntercepted} 次\n` +
+      `⚡ **防刷屏触发**: ${s.rateLimitTriggers} 次\n` +
+      `🤖 **人机验证通过**: ${s.verifiedMembers} 人\n` +
+      `📢 **广播推送总数**: ${s.totalBroadcasts} 次\n` +
+      `────────────────────\n` +
+      `⏰ **北京时间**: ${bjTime}`;
+    await sendMessage(chatId, statsMsg, null, "Markdown", false, env);
+    return;
+  }
 
-  // 推广和客服功能：私聊直接处理；群里只处理艾特了机器人的消息
+  if (text.startsWith("/broadcast ")) {
+    const broadcastText = text.replace("/broadcast ", "").trim();
+    if (!broadcastText) return;
+
+    let count = 0;
+    for (const targetChatId of BROADCAST_CHAT_IDS) {
+      await sendMessage(targetChatId, `📢 **广播通知**\n\n${broadcastText}`, null, "Markdown", true, env);
+      count++;
+      await incrementStat("totalBroadcasts", env);
+    }
+    await sendMessage(chatId, `✅ 已成功一键广播至 ${count} 个目标群组！`, null, null, false, env);
+    return;
+  }
+
+  // ── 5. 响应原本的推广功能 ─────────────────────────────────────
+  const isMentioned = text.includes(BOT_USERNAME);
+
   if (!isPrivate && !isMentioned) return;
 
-  // ── /start：第一次建立连接时欢迎 ─────────────────────────────
   if (text === "/start" || text.startsWith("/start ")) {
     await sendMessage(chatId, WELCOME_TEXT, null, null, true, env);
     return;
   }
 
-  // ── 关键词匹配：发送推广消息 ──────────────────────────────────
   const hit = KEYWORDS.some((kw) => text.includes(kw));
   if (hit) {
     await sendPromoPhoto(chatId, env);
@@ -183,7 +322,7 @@ async function handleUpdate(update, env = null) {
 }
 
 // ── 入群验证按钮逻辑 ─────────────────────────────────────────────
-async function handleCallbackQuery(callbackQuery) {
+async function handleCallbackQuery(callbackQuery, env = null) {
   const data = callbackQuery.data;
   const fromId = callbackQuery.from.id;
   const chatId = callbackQuery.message.chat.id;
@@ -192,15 +331,12 @@ async function handleCallbackQuery(callbackQuery) {
   if (data.startsWith("verify_")) {
     const targetUserId = parseInt(data.replace("verify_", ""));
     
-    // 检查是不是被要求验证的本人点的
     if (fromId === targetUserId) {
-      // 验证成功，解除禁言
       await restrictChatMember(chatId, fromId, true);
       await answerCallbackQuery(callbackQuery.id, "✅ 验证通过，您可以自由发言了！", true);
-      // 删除验证消息本身
       await deleteMessage(chatId, messageId);
+      await incrementStat("verifiedMembers", env);
     } else {
-      // 不是本人点，弹窗提示
       await answerCallbackQuery(callbackQuery.id, "❌ 请让新进群的用户自己点击验证！", true);
     }
   }
@@ -210,7 +346,10 @@ async function handleCallbackQuery(callbackQuery) {
 //  📤  Telegram API 封装
 // ============================================================
 
-/** 发送推广图片（含按钮），并自动删除上一次发送的消息 */
+// 轮播索引计数器
+let promoRotationIndex = 0;
+
+/** 发送推广图片（含按钮，支持多套轮播，并自动删除上一条消息） */
 async function sendPromoPhoto(chatId, env = null) {
   // 1. 删除该群/私聊上一次发送的消息
   const oldMsgId = await getLastMsgId(chatId, env);
@@ -219,7 +358,11 @@ async function sendPromoPhoto(chatId, env = null) {
     await deleteMessage(chatId, oldMsgId);
   }
 
-  // 2. 发送新的推广消息
+  // 2. 从轮播列表中取出当前推广内容
+  const promo = PROMO_MESSAGES[promoRotationIndex % PROMO_MESSAGES.length];
+  promoRotationIndex++;
+
+  // 3. 发送新的推广消息
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
   try {
     const res = await fetch(url, {
@@ -227,15 +370,15 @@ async function sendPromoPhoto(chatId, env = null) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id:      chatId,
-        photo:        PROMO_MESSAGE.photo,
-        caption:      PROMO_MESSAGE.caption,
-        reply_markup: PROMO_MESSAGE.keyboard,
+        photo:        promo.photo,
+        caption:      promo.caption,
+        parse_mode:   "Markdown",
+        reply_markup: promo.keyboard,
       }),
     });
     const result = await res.json();
     console.log(`sendPhoto → ${chatId}:`, result.ok);
     if (result.ok && result.result?.message_id) {
-      // 3. 保存最新发送的消息 ID
       await setLastMsgId(chatId, result.result.message_id, env);
     }
   } catch (e) {
@@ -243,7 +386,7 @@ async function sendPromoPhoto(chatId, env = null) {
   }
 }
 
-/** 发送纯文字消息 (支持附加键盘、格式，以及选择性删除上一次发送的消息) */
+/** 发送纯文字消息 */
 async function sendMessage(chatId, text, reply_markup = null, parse_mode = null, deletePrevious = false, env = null) {
   if (deletePrevious) {
     const oldMsgId = await getLastMsgId(chatId, env);
@@ -343,4 +486,4 @@ async function answerCallbackQuery(callbackQueryId, text, showAlert = false) {
   } catch (e) {
     console.error("answerCallbackQuery 失败:", e);
   }
-}
+}
