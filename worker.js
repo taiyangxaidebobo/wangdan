@@ -20,7 +20,7 @@ const ADMIN_IDS = [
 // ⭐ 核心推广消息配置 —— 支持多套文案/图片轮播展示
 const PROMO_MESSAGES = [
   {
-    photo:   "https://i.postimg.cc/fRzRTQY9/Gemini-G.png",
+    photo:   "https://i.postimg.cc/9FyZnPtk/xunjie-final-poster-1785696923575.jpg",
     caption: "🔥 **代副挂最新稳定版已更新！**\n具备防封防护与高效率运营，欢迎下载体验。",
     keyboard: {
       inline_keyboard: [
